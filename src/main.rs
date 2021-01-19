@@ -1,8 +1,8 @@
 use std::io;
 use std::cell::RefCell;
 use std::error::Error;
-use std::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
 use tokio::sync::watch;
@@ -51,11 +51,9 @@ impl Reporter {
     }
 
     async fn run(mut self) {
-        println!("good run");
         loop {
             tokio::select! {
                 res = self.listener.accept() => {
-                    println!("get connetion");
                     match res {
                         Ok((stream, _addr)) => {
                             match timeout(Duration::from_millis(1000),
@@ -81,7 +79,7 @@ impl Reporter {
                             }
                         },
                         Err(e) => {
-                            println!("control: {}", e);
+                            eprintln!("quit control: {}", e);
                             break;
                         }
                     }
@@ -115,7 +113,7 @@ impl Notifier {
         }
     }
 
-    fn notify(&self, msg: &str, actions: &[(&str, &str)]) -> Result<String, ()> {
+    async fn notify(&self, msg: &str, actions: &[(&str, &str)]) -> Result<String, ()> {
         let actions: Vec<String> = actions
             .iter()
             .map(|(action, label)| format!("--action={},{}", action, label))
@@ -123,7 +121,7 @@ impl Notifier {
         let mut args: Vec<String> = Vec::new();
         args.extend(actions);
         args.push(msg.to_string());
-        let output = self.backend.borrow_mut().args(&args).output().unwrap();
+        let output = self.backend.borrow_mut().args(&args).output().await.unwrap();
         if output.status.success() {
             let output = String::from_utf8(output.stdout).unwrap().trim().to_string();
             if output != "2" {
@@ -149,18 +147,16 @@ fn prepare_quit_signal() -> (JoinHandle<()>, Quit) {
 
 #[tokio::main]
 async fn main() {
-    // let notifier = Notifier::new();
-    // if let Ok(selection) = notifier.notify("help me", &[("ok","Ok"),("like","Like")]) {
-    //     println!("{}", selection);
-    // };
-    // if let Ok(selection) = notifier.notify("good me", &[("ok","Ok"),("like","Like")]) {
-    //     println!("{}", selection);
-    // };
-    let (quit_handle, quit_signal) = prepare_quit_signal();
-    let reporter = Reporter::new(quit_signal.clone()).unwrap();
-    let repoter_handle = tokio::spawn(async move {
-        reporter.run().await
-    });
-    quit_handle.await.unwrap();
-    repoter_handle.await.unwrap();
+    let notifier = Notifier::new();
+    if let Ok(selection) = notifier.notify("help me", &[("ok","Ok"),("like","Like")]).await {
+        println!("{}", selection);
+    };
+
+    // let (quit_handle, quit_signal) = prepare_quit_signal();
+    // let reporter = Reporter::new(quit_signal.clone()).unwrap();
+    // let repoter_handle = tokio::spawn(async move {
+    //     reporter.run().await
+    // });
+    // quit_handle.await.unwrap();
+    // repoter_handle.await.unwrap();
 }
