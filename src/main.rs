@@ -1,21 +1,25 @@
-use std::cell::RefCell;
 use std::io;
-use std::io::prelude::*;
-use std::thread;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::cell::RefCell;
+use std::error::Error;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::{UnixListener, UnixStream};
+use tokio::signal;
+use tokio::sync::watch;
+use tokio::time::timeout;
+use tokio::task::JoinHandle;
 
 static UNIX_ADDRESS: &'static str = "/tmp/tomato-notity-socket";
 
+type Quit = watch::Receiver<bool>;
+
 struct Reporter {
     listener: UnixListener,
-    control: Arc<AtomicBool>,
+    control: Quit,
 }
 
 impl Reporter {
-    fn new(control: Arc<AtomicBool>) -> io::Result<Reporter> {
+    fn new(control: Quit) -> Result<Reporter, Box<dyn Error>> {
         let reporter = Reporter {
             listener: UnixListener::bind(UNIX_ADDRESS)?,
             control,
@@ -23,24 +27,73 @@ impl Reporter {
         Ok(reporter)
     }
 
-    fn report(mut stream: UnixStream) {
-        stream.write_all(b"hello").unwrap();
+    fn report(stream: &UnixStream) -> std::io::Result<()> {
+        match stream.try_write(b"hello world") {
+            Ok(_n) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
-    fn run(self) -> thread::JoinHandle<()> {
-        thread::spawn( move || {
-            for stream in self.listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        Reporter::report(stream);
-                    }
-                    Err(e) => eprintln!("accept stream failed: {}", e),
+    async fn handle_stream(stream: UnixStream) -> Result<(), Box<dyn Error>> {
+        loop {
+            stream.writable().await?;
+            match Reporter::report(&stream) {
+                Ok(_) => break Ok(()),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    println!("WouldBlock");
+                    continue;
                 }
-                if ! self.control.load(Ordering::SeqCst) {
-                    break;
+                Err(e) => {
+                    return Err(e.into());
                 }
             }
-        })
+        }
+    }
+
+    async fn run(mut self) {
+        println!("good run");
+        loop {
+            tokio::select! {
+                res = self.listener.accept() => {
+                    println!("get connetion");
+                    match res {
+                        Ok((stream, _addr)) => {
+                            match timeout(Duration::from_millis(1000),
+                                Reporter::handle_stream(stream)).await {
+                                Err(_) => eprintln!("process timeout"),
+                                Ok(Err(e)) => eprintln!("{}", e),
+                                Ok(Ok(_)) => {},
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("accept stream failed: {}", e);
+                            break;
+                        },
+                    }
+                },
+                res = self.control.changed() => {
+                    match res {
+                        Ok(_) => {
+                            println!("exit with {:?}", res);
+                            println!("control = {}", *self.control.borrow());
+                            if *self.control.borrow() {
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            println!("control: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Reporter {
+    fn drop(&mut self) {
+       std::fs::remove_file(UNIX_ADDRESS).unwrap();
     }
 }
 
@@ -84,7 +137,18 @@ impl Notifier {
     }
 }
 
-fn main() {
+fn prepare_quit_signal() -> (JoinHandle<()>, Quit) {
+    let (tx, rx) = watch::channel(false);
+    let handle = tokio::spawn(async move {
+        signal::ctrl_c().await.unwrap();
+        println!("get ctrl_c");
+        tx.send(true).unwrap();
+    });
+    (handle, rx)
+}
+
+#[tokio::main]
+async fn main() {
     // let notifier = Notifier::new();
     // if let Ok(selection) = notifier.notify("help me", &[("ok","Ok"),("like","Like")]) {
     //     println!("{}", selection);
@@ -92,15 +156,11 @@ fn main() {
     // if let Ok(selection) = notifier.notify("good me", &[("ok","Ok"),("like","Like")]) {
     //     println!("{}", selection);
     // };
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    }).expect("Error setting Ctrl-C handler");
-
-    let reporter = Reporter::new(running.clone()).unwrap();
-    let reporter = reporter.run();
-    reporter.join().unwrap();
+    let (quit_handle, quit_signal) = prepare_quit_signal();
+    let reporter = Reporter::new(quit_signal.clone()).unwrap();
+    let repoter_handle = tokio::spawn(async move {
+        reporter.run().await
+    });
+    quit_handle.await.unwrap();
+    repoter_handle.await.unwrap();
 }
