@@ -17,7 +17,17 @@ static NOTIFY_REMIND_DURATION: u64 = 1;
 
 #[inline(always)]
 fn min2sec(min: u64) -> u64 {
-    min * 10
+    min * 5
+}
+
+fn dura_sub(lhs: &Duration, rhs: &Duration) -> i32 {
+    match lhs.checked_sub(*rhs) {
+        Some(gt) => gt.as_secs() as i32,
+        None => match rhs.checked_sub(*lhs) {
+            Some(lt) => - (lt.as_secs() as i32),
+            None => 0,
+        }
+    }
 }
 
 async fn sleep_min(min: u64) {
@@ -64,7 +74,7 @@ impl TomatoClock {
         }
     }
 
-    async fn run(self) {
+    async fn clock_logic(&self) {
         let mut manual_start = true;
         loop {
             for tomato in 0..4 {
@@ -106,35 +116,73 @@ impl TomatoClock {
             }
         }
     }
+
+    async fn run(self, mut control: Quit) {
+        tokio::select! {
+            // the whole clock_logic process can be intercepted
+            _ = self.clock_logic() => {},
+            res = control.changed() => {
+                match res {
+                    Ok(_) => {
+                        println!("clock exit with {:?}", res);
+                        println!("control = {}", *control.borrow());
+                        if *control.borrow() {
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("clock quit control: {}", e);
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }
 
 type Quit = watch::Receiver<bool>;
 
 struct Remote {
     listener: UnixListener,
-    control: Quit,
+    clock_status: Arc<Mutex<ClockInfo>>,
 }
 
 impl Remote {
-    fn new(control: Quit) -> Result<Self, Box<dyn Error>> {
+    fn new(clock_status: Arc<Mutex<ClockInfo>>) -> Result<Self, Box<dyn Error>> {
         let reporter = Remote {
             listener: UnixListener::bind(UNIX_ADDRESS)?,
-            control,
+            clock_status,
         };
         Ok(reporter)
     }
 
-    fn report(stream: &UnixStream) -> std::io::Result<()> {
-        match stream.try_write(b"hello world") {
+    fn report(&self, stream: &UnixStream) -> std::io::Result<()> {
+        let msg = {
+            let clock_status = self.clock_status.lock().unwrap();
+            let elapsed = clock_status.last_checked.elapsed();
+            let due_duration = match clock_status.tomato_status {
+                TomatoStatus::Busy => {
+                    Duration::from_secs(min2sec(BUSY_DURATION))
+                },
+                TomatoStatus::ShortBreak => {
+                    Duration::from_secs(min2sec(SHORT_BREAK_DURATION))
+                },
+                TomatoStatus::LongBreak => {
+                    Duration::from_secs(min2sec(LONG_BREAK_DURATION))
+                },
+            };
+            dura_sub(&due_duration, &elapsed).to_string()
+        };
+        match stream.try_write(&msg.into_bytes()) {
             Ok(_n) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
 
-    async fn handle_stream(stream: UnixStream) -> Result<(), Box<dyn Error>> {
+    async fn handle_stream(&self, stream: UnixStream) -> Result<(), Box<dyn Error>> {
         loop {
             stream.writable().await?;
-            match Remote::report(&stream) {
+            match self.report(&stream) {
                 Ok(_) => break Ok(()),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     continue;
@@ -146,14 +194,14 @@ impl Remote {
         }
     }
 
-    async fn run(mut self) {
+    async fn run(self, mut control: Quit) {
         loop {
             tokio::select! {
                 res = self.listener.accept() => {
                     match res {
                         Ok((stream, _addr)) => {
                             match timeout(Duration::from_millis(1000),
-                                Remote::handle_stream(stream)).await {
+                                self.handle_stream(stream)).await {
                                 Err(_) => eprintln!("process timeout"),
                                 Ok(Err(e)) => eprintln!("{}", e),
                                 Ok(Ok(_)) => {},
@@ -165,17 +213,17 @@ impl Remote {
                         },
                     }
                 },
-                res = self.control.changed() => {
+                res = control.changed() => {
                     match res {
                         Ok(_) => {
-                            println!("exit with {:?}", res);
-                            println!("control = {}", *self.control.borrow());
-                            if *self.control.borrow() {
+                            println!("remote exit with {:?}", res);
+                            println!("control = {}", *control.borrow());
+                            if *control.borrow() {
                                 break;
                             }
                         },
                         Err(e) => {
-                            eprintln!("quit control: {}", e);
+                            eprintln!("remote quit control: {}", e);
                             break;
                         }
                     }
@@ -211,8 +259,8 @@ impl Notifier {
         let mut args: Vec<String> = Vec::new();
         args.extend(actions);
         args.push(msg.to_string());
-        let mut command = Command::new("dunstify");
-        let command = command.args(&args);
+        let mut command = Command::new(&self.backend);
+        let command = command.kill_on_drop(true).args(&args);
         let output = command.output().await.unwrap();
         if output.status.success() {
             let output = String::from_utf8(output.stdout).unwrap().trim().to_string();
@@ -238,18 +286,22 @@ fn prepare_quit_signal() -> (JoinHandle<()>, Quit) {
 
 #[tokio::main]
 async fn main() {
-    let clock = TomatoClock::new();
-    tokio::spawn(async move {
-        clock.run().await;
-    })
-    .await
-    .unwrap();
+    let (quit_handle, quit_signal) = prepare_quit_signal();
 
-    // let (quit_handle, quit_signal) = prepare_quit_signal();
-    // let Remote = Remote::new(quit_signal.clone()).unwrap();
-    // let repoter_handle = tokio::spawn(async move {
-    //     Remote.run().await
-    // });
-    // quit_handle.await.unwrap();
-    // repoter_handle.await.unwrap();
+    let clock = TomatoClock::new();
+    let remote = Remote::new(clock.get_info()).unwrap();
+
+    let clock_quit_signal = quit_signal.clone();
+    let clock_handle = tokio::spawn(async move {
+        clock.run(clock_quit_signal).await;
+    });
+
+    let remote_quit_signal = quit_signal.clone();
+    let remote_handle = tokio::spawn(async move {
+        remote.run(remote_quit_signal).await
+    });
+
+    quit_handle.await.unwrap();
+    clock_handle.await.unwrap();
+    remote_handle.await.unwrap();
 }
