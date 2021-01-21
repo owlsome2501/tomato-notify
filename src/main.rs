@@ -207,7 +207,7 @@ impl Remote {
 
     async fn handle_stream(&self, stream: UnixStream) -> Result<(), Box<dyn Error>> {
         let command = loop {
-            stream.writable().await?;
+            stream.readable().await?;
             match self.receive(&stream) {
                 Ok(command) => break command,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
