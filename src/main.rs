@@ -156,8 +156,7 @@ impl Remote {
         Ok(reporter)
     }
 
-    fn report(&self, stream: &UnixStream) -> std::io::Result<()> {
-        let msg = {
+    fn api_get_info(&self) -> String {
             let clock_status = self.clock_status.lock().unwrap();
             let elapsed = clock_status.last_checked.elapsed();
             let due_duration = match clock_status.tomato_status {
@@ -172,6 +171,13 @@ impl Remote {
                 },
             };
             dura_sub(&due_duration, &elapsed).to_string()
+    }
+
+    // may can't send all data
+    fn send(&self, stream: &UnixStream, command: &str) -> std::io::Result<()> {
+        let msg = match command {
+            "GET INFO" => self.api_get_info(),
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid command")),
         };
         match stream.try_write(&msg.into_bytes()) {
             Ok(_n) => Ok(()),
@@ -179,11 +185,43 @@ impl Remote {
         }
     }
 
+    // may can't receive all data
+    fn receive(&self, stream: &UnixStream) -> std::io::Result<String> {
+        let mut buf = [0; 32];
+        match stream.try_read(&mut buf) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WouldBlock, "empty read")),
+            Ok(_n) => {},
+            Err(e) => return Err(e.into()),
+        }
+        let buf = match std::str::from_utf8(&buf) {
+            Ok(v) => v,
+            Err(_e) => return Err(io::Error::new(io::ErrorKind::InvalidData, "not utf-8")),
+        };
+        let l = match buf.find("\n") {
+            Some(l) if l == 0 => return Err(io::Error::new(io::ErrorKind::InvalidData, "empty command")),
+            Some(l) => l,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidData, r"no \n")),
+        };
+        Ok(buf[0..l].to_string())
+    }
+
     async fn handle_stream(&self, stream: UnixStream) -> Result<(), Box<dyn Error>> {
+        let command = loop {
+            stream.writable().await?;
+            match self.receive(&stream) {
+                Ok(command) => break command,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        };
         loop {
             stream.writable().await?;
-            match self.report(&stream) {
-                Ok(_) => break Ok(()),
+            match self.send(&stream, &command) {
+                Ok(_) => return Ok(()),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     continue;
                 }

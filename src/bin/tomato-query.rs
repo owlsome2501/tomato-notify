@@ -6,6 +6,7 @@ static UNIX_ADDRESS: &'static str = "/tmp/tomato-notity-socket";
 fn main() {
     let mut stream = UnixStream::connect(UNIX_ADDRESS).unwrap();
     let mut response = String::new();
+    stream.write_all("GET INFO\n".as_bytes()).unwrap();
     stream.read_to_string(&mut response).unwrap();
     println!("{}", response);
 }
