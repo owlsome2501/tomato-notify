@@ -24,9 +24,9 @@ fn dura_sub(lhs: &Duration, rhs: &Duration) -> i32 {
     match lhs.checked_sub(*rhs) {
         Some(gt) => gt.as_secs() as i32,
         None => match rhs.checked_sub(*lhs) {
-            Some(lt) => - (lt.as_secs() as i32),
+            Some(lt) => -(lt.as_secs() as i32),
             None => 0,
-        }
+        },
     }
 }
 
@@ -157,27 +157,26 @@ impl Remote {
     }
 
     fn api_get_info(&self) -> String {
-            let clock_status = self.clock_status.lock().unwrap();
-            let elapsed = clock_status.last_checked.elapsed();
-            let due_duration = match clock_status.tomato_status {
-                TomatoStatus::Busy => {
-                    Duration::from_secs(min2sec(BUSY_DURATION))
-                },
-                TomatoStatus::ShortBreak => {
-                    Duration::from_secs(min2sec(SHORT_BREAK_DURATION))
-                },
-                TomatoStatus::LongBreak => {
-                    Duration::from_secs(min2sec(LONG_BREAK_DURATION))
-                },
-            };
-            dura_sub(&due_duration, &elapsed).to_string()
+        let clock_status = self.clock_status.lock().unwrap();
+        let elapsed = clock_status.last_checked.elapsed();
+        let due_duration = match clock_status.tomato_status {
+            TomatoStatus::Busy => Duration::from_secs(min2sec(BUSY_DURATION)),
+            TomatoStatus::ShortBreak => Duration::from_secs(min2sec(SHORT_BREAK_DURATION)),
+            TomatoStatus::LongBreak => Duration::from_secs(min2sec(LONG_BREAK_DURATION)),
+        };
+        dura_sub(&due_duration, &elapsed).to_string()
     }
 
     // may can't send all data
     fn send(&self, stream: &UnixStream, command: &str) -> std::io::Result<()> {
         let msg = match command {
             "GET INFO" => self.api_get_info(),
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid command")),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid command",
+                ))
+            }
         };
         match stream.try_write(&msg.into_bytes()) {
             Ok(_n) => Ok(()),
@@ -190,7 +189,7 @@ impl Remote {
         let mut buf = [0; 32];
         match stream.try_read(&mut buf) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::WouldBlock, "empty read")),
-            Ok(_n) => {},
+            Ok(_n) => {}
             Err(e) => return Err(e.into()),
         }
         let buf = match std::str::from_utf8(&buf) {
@@ -198,7 +197,9 @@ impl Remote {
             Err(_e) => return Err(io::Error::new(io::ErrorKind::InvalidData, "not utf-8")),
         };
         let l = match buf.find("\n") {
-            Some(l) if l == 0 => return Err(io::Error::new(io::ErrorKind::InvalidData, "empty command")),
+            Some(l) if l == 0 => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "empty command"))
+            }
             Some(l) => l,
             None => return Err(io::Error::new(io::ErrorKind::InvalidData, r"no \n")),
         };
@@ -335,9 +336,7 @@ async fn main() {
     });
 
     let remote_quit_signal = quit_signal.clone();
-    let remote_handle = tokio::spawn(async move {
-        remote.run(remote_quit_signal).await
-    });
+    let remote_handle = tokio::spawn(async move { remote.run(remote_quit_signal).await });
 
     quit_handle.await.unwrap();
     clock_handle.await.unwrap();
