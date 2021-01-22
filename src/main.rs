@@ -2,6 +2,7 @@ use std::error::Error;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
 use tokio::signal;
@@ -167,8 +168,7 @@ impl Remote {
         dura_sub(&due_duration, &elapsed).to_string()
     }
 
-    // may can't send all data
-    fn send(&self, stream: &UnixStream, command: &str) -> std::io::Result<()> {
+    async fn send(&self, stream: &mut UnixStream, command: &str) -> std::io::Result<()> {
         let msg = match command {
             "GET INFO" => self.api_get_info(),
             _ => {
@@ -178,58 +178,54 @@ impl Remote {
                 ))
             }
         };
-        match stream.try_write(&msg.into_bytes()) {
+        match stream.write_all(&msg.into_bytes()).await {
             Ok(_n) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
 
-    // may can't receive all data
-    fn receive(&self, stream: &UnixStream) -> std::io::Result<String> {
-        let mut buf = [0; 32];
-        match stream.try_read(&mut buf) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::WouldBlock, "empty read")),
-            Ok(_n) => {}
-            Err(e) => return Err(e.into()),
+    // client must close write stream after send the whole command
+    async fn receive(&self, stream: &mut UnixStream) -> std::io::Result<String> {
+        let mut dst: [u8; 32] = [0; 32];
+        {
+            let mut buf = &mut dst[..];
+            loop {
+                match stream.read_buf(&mut buf).await {
+                    Ok(0) => {
+                        break;
+                    }
+                    Ok(_n) => {
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
-        let buf = match std::str::from_utf8(&buf) {
-            Ok(v) => v,
-            Err(_e) => return Err(io::Error::new(io::ErrorKind::InvalidData, "not utf-8")),
-        };
-        let l = match buf.find("\n") {
+        let l = match (&mut dst).iter().position(|&b| b == ('\n' as u8)) {
             Some(l) if l == 0 => {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty command"))
             }
             Some(l) => l,
             None => return Err(io::Error::new(io::ErrorKind::InvalidData, r"no \n")),
         };
-        Ok(buf[0..l].to_string())
+        let buf = &dst[..l];
+        let buf = match std::str::from_utf8(&buf) {
+            Ok(v) => v,
+            Err(_e) => return Err(io::Error::new(io::ErrorKind::InvalidData, "not utf-8")),
+        };
+        Ok(buf.to_string())
     }
 
-    async fn handle_stream(&self, stream: UnixStream) -> Result<(), Box<dyn Error>> {
-        let command = loop {
-            stream.readable().await?;
-            match self.receive(&stream) {
-                Ok(command) => break command,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
+    async fn handle_stream(&self, mut stream: UnixStream) -> Result<(), Box<dyn Error>> {
+        let command = match self.receive(&mut stream).await {
+            Ok(command) => command,
+            Err(e) => {
+                return Err(e.into());
             }
         };
-        loop {
-            stream.writable().await?;
-            match self.send(&stream, &command) {
-                Ok(_) => return Ok(()),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
-            }
+        match self.send(&mut stream, &command).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 
