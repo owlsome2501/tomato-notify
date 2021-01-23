@@ -15,7 +15,7 @@ fn main() {
             SubCommand::with_name("status")
                 .about("get clock status")
                 .arg_from_usage("--polybar 'use polybar style output'")
-                .arg_from_usage("--style=[FILE] 'custom polybar output style'"),
+                .arg_from_usage("--style=[FILE] 'custom polybar output style [not implemented]'"),
         )
         .subcommand(SubCommand::with_name("ready").about("send ready action"))
         .subcommand(SubCommand::with_name("remind").about("send remind action"))
