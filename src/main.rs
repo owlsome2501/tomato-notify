@@ -11,14 +11,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 static UNIX_ADDRESS: &'static str = "/tmp/tomato-notity-socket";
-static BUSY_DURATION: u64 = 25;
-static SHORT_BREAK_DURATION: u64 = 5;
-static LONG_BREAK_DURATION: u64 = 15;
-static NOTIFY_REMIND_DURATION: u64 = 2;
+static BUSY_DURATION: u64 = 1;
+static SHORT_BREAK_DURATION: u64 = 1;
+static LONG_BREAK_DURATION: u64 = 1;
+static NOTIFY_REMIND_DURATION: u64 = 1;
 
 #[inline(always)]
 fn min2sec(min: u64) -> u64 {
-    min * 60
+    min * 20
 }
 
 fn dura_sub(lhs: &Duration, rhs: &Duration) -> i32 {
@@ -364,7 +364,6 @@ impl NotifierRemote {
 
     async fn run(mut self, mut control: Quit) {
         tokio::select! {
-            // the whole clock_logic process can be intercepted
             _ = self.tomato_notify() => {},
             res = control.changed() => {
                 match res {
