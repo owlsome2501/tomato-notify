@@ -11,14 +11,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 static UNIX_ADDRESS: &'static str = "/tmp/tomato-notity-socket";
-static BUSY_DURATION: u64 = 1;
-static SHORT_BREAK_DURATION: u64 = 1;
-static LONG_BREAK_DURATION: u64 = 1;
-static NOTIFY_REMIND_DURATION: u64 = 1;
+static BUSY_DURATION: u64 = 25;
+static SHORT_BREAK_DURATION: u64 = 5;
+static LONG_BREAK_DURATION: u64 = 15;
+static NOTIFY_REMIND_DURATION: u64 = 2;
 
 #[inline(always)]
 fn min2sec(min: u64) -> u64 {
-    min * 20
+    min * 60
 }
 
 fn dura_sub(lhs: &Duration, rhs: &Duration) -> i32 {
