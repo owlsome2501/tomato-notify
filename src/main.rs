@@ -94,12 +94,12 @@ impl TomatoClock {
     }
 
     // [Fix me] bad solution
-    async fn _clear_action_input(&mut self) {
+    async fn clear_action_input(&mut self) {
         let exhaust_receiver = async { while let Some(_) = self.action_input.recv().await {} };
         let _ = timeout(Duration::from_millis(100), exhaust_receiver).await;
     }
 
-    async fn _wait_for_ready_action(&mut self) {
+    async fn wait_for_ready_action(&mut self) {
         loop {
             // action_input.recv return None when other senders were closed
             let action = self.action_input.recv().await.unwrap();
@@ -110,13 +110,13 @@ impl TomatoClock {
     }
 
     async fn notify(&mut self) {
-        self._clear_action_input().await;
+        self.clear_action_input().await;
         loop {
             let mut notify_status = self.status_output.borrow().clone();
             notify_status.need_notify = true;
             self.status_output.send(notify_status).unwrap();
             tokio::select! {
-                _ = self._wait_for_ready_action() => {break;},
+                _ = self.wait_for_ready_action() => {break;},
                 _ = sleep_min(NOTIFY_REMIND_DURATION) => {},
             }
         }
@@ -394,7 +394,7 @@ impl NotifierRemote {
                 TomatoStatus::LongBreak => "Long break",
             };
             let actions = [("ok", "Ok"), ("remind", "Remind me later")];
-            let selection = self._notify(msg, &actions).await;
+            let selection = self.notify(msg, &actions).await;
             match selection {
                 Ok(Some(selection)) if selection == "ok" => {
                     self.action_sender.send(TomatoActions::Ready).await.unwrap();
@@ -409,7 +409,7 @@ impl NotifierRemote {
         }
     }
 
-    async fn _notify(&self, msg: &str, actions: &[(&str, &str)]) -> Result<Option<String>, ()> {
+    async fn notify(&self, msg: &str, actions: &[(&str, &str)]) -> Result<Option<String>, ()> {
         let actions: Vec<String> = actions
             .iter()
             .map(|(action, label)| format!("--action={},{}", action, label))
