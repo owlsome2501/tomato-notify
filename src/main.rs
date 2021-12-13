@@ -270,7 +270,7 @@ impl SocketRemote {
                 }
             }
         }
-        let l = match (&mut dst).iter().position(|&b| b == ('\n' as u8)) {
+        let l = match dst.iter().position(|&b| b == ('\n' as u8)) {
             Some(l) if l == 0 => {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty command"))
             }
